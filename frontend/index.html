@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Payday Splitter</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.2rem; margin-top: 2rem; }
+  .card { border: 1px solid #ddd; border-radius: 12px; padding: 1rem; margin: 0.75rem 0; }
+  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+  button { padding: 0.5rem 0.9rem; border-radius: 8px; border: 1px solid #333; background: #fff; cursor: pointer; }
+  button.primary { background: #111; color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .ok { color: #0a7a2f; } .bad { color: #b00020; } .mono { font-family: monospace; font-size: 0.85rem; word-break: break-all; }
+  #log { background: #111; color: #d4ffd4; padding: 1rem; border-radius: 12px; min-height: 8rem; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; }
+  .addr { font-size: 0.8rem; }
+  .bucket { font-size: 1.1rem; }
+</style>
+</head>
+<body>
+<h1>Payday Splitter</h1>
+<p>Set your split once, then forget it. Every payday, when salary lands in the
+vault on Base Sepolia, the reactive contract on Lasna sees it and the split
+happens on its own. No bot, no manual transaction. Track: <b>Set It and Forget It</b>.</p>
+
+<div class="card">
+  <div class="row">
+    <button id="connectBtn" class="primary">Connect Wallet</button>
+    <span id="walletInfo">Not connected. Use Base Sepolia (84532).</span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Split config</h2>
+  <div>Spending: <b id="spendingBps">-</b> · Savings: <b id="savingsBps">-</b> · Investing: <b id="investingBps">-</b></div>
+  <div>Min salary: <b id="minSalary">-</b> · Big payday at: <b id="bigPayday">-</b> · Savings boost: <b id="boost">-</b> · Cooldown: <b id="cooldown">-</b></div>
+  <div>Pending salary in vault: <b id="pending">-</b></div>
+  <div class="addr">Vault: <span class="mono" id="vaultAddr"></span><br/>
+  Reactive (Lasna): <span class="mono" id="reactiveAddr"></span></div>
+  <div class="row" style="margin-top:.5rem"><button id="refreshBtn">Refresh status</button></div>
+</div>
+
+<div class="card">
+  <h2>Buckets</h2>
+  <div class="bucket">Spending: <b id="spendingBal">-</b> mUSDC <span class="addr mono" id="spendingAddr"></span></div>
+  <div class="bucket">Savings: <b id="savingsBal">-</b> mUSDC <span class="addr mono" id="savingsAddr"></span></div>
+  <div class="bucket">Investing: <b id="investingBal">-</b> mUSDC <span class="addr mono" id="investingAddr"></span></div>
+</div>
+
+<div class="card">
+  <h2>Send salary (demo)</h2>
+  <div class="row">
+    <button id="mintBtn">Mint 2000 mUSDC</button>
+    <button id="salaryBtn" class="primary">Send 1000 mUSDC salary</button>
+  </div>
+  <p class="addr">1000 mUSDC is a big payday, so savings gets a 10 percent boost.
+  Expected split: 500 spending, 400 savings, 100 investing. The reactive
+  contract on Lasna picks the deposit up and calls back to the vault. Give it a
+  few seconds, then refresh.</p>
+</div>
+
+<div class="card">
+  <h2>Loop history (live)</h2>
+  <div id="log">Waiting for events…</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let provider, signer, account;
+let usdc, vault;
+
+function log(msg) {
+  const el = $("log");
+  if (el.textContent === "Waiting for events…") el.textContent = "";
+  el.textContent += `[${new Date().toLocaleTimeString("en-US")}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+async function loadAbi(name) {
+  const r = await fetch(`abi/${name}.json`);
+  return r.json();
+}
+function fmt(n) { return (Number(n) / 1e6).toFixed(2); }
+async function refresh() {
+  if (!vault) return;
+  $("spendingBps").textContent = (Number(await vault.spendingBps()) / 100).toFixed(0) + "%";
+  $("savingsBps").textContent = (Number(await vault.savingsBps()) / 100).toFixed(0) + "%";
+  $("investingBps").textContent = (Number(await vault.investingBps()) / 100).toFixed(0) + "%";
+  $("pending").textContent = fmt(await vault.pendingSalary()) + " mUSDC";
+  const spending = await vault.spendingBucket();
+  const savings = await vault.savingsBucket();
+  const investing = await vault.investingBucket();
+  $("spendingAddr").textContent = spending;
+  $("savingsAddr").textContent = savings;
+  $("investingAddr").textContent = investing;
+  $("spendingBal").textContent = fmt(await usdc.balanceOf(spending));
+  $("savingsBal").textContent = fmt(await usdc.balanceOf(savings));
+  $("investingBal").textContent = fmt(await usdc.balanceOf(investing));
+}
+
+async function connect() {
+  if (!window.ethereum) { alert("Need an EVM wallet (MetaMask/Rabby) in the browser."); return; }
+  provider = new ethers.BrowserProvider(window.ethereum);
+  await provider.send("eth_requestAccounts", []);
+  signer = await provider.getSigner();
+  account = await signer.getAddress();
+  const net = await provider.getNetwork();
+  if (Number(net.chainId) !== CONFIG.baseSepoliaChainId) {
+    $("walletInfo").textContent = `Connected ${account.slice(0, 8)}… but on chain ${net.chainId}. Switch to Base Sepolia (84532).`;
+    return;
+  }
+  $("walletInfo").textContent = `Connected: ${account}`;
+  usdc = new ethers.Contract(CONFIG.mockUSDC, await loadAbi("MockToken"), signer);
+  vault = new ethers.Contract(CONFIG.vault, await loadAbi("PaydayVault"), signer);
+  vault.on("SalaryReceived", (employee, amount) => {
+    log(`SalaryReceived: ${fmt(amount)} mUSDC from ${employee.slice(0, 8)}…`);
+    setTimeout(refresh, 8000);
+  });
+  vault.on("SalaryDistributed", (amount, spending, savings, investing) => {
+    log(`SalaryDistributed: ${fmt(amount)} mUSDC split into ${fmt(spending)} spending, ${fmt(savings)} savings, ${fmt(investing)} investing`);
+    refresh();
+  });
+  vault.on("SalarySkipped", (requested, pending) => log(`SalarySkipped: requested ${fmt(requested)}, pending ${fmt(pending)}`));
+  await refresh();
+}
+
+$("connectBtn").onclick = connect;
+$("refreshBtn").onclick = refresh;
+$("mintBtn").onclick = async () => {
+  const tx = await usdc.mint(account, 2000_000000n);
+  log("mint tx: " + tx.hash); await tx.wait(); log("2000 mUSDC minted"); await refresh();
+};
+$("salaryBtn").onclick = async () => {
+  let tx = await usdc.approve(CONFIG.vault, 1000_000000n); await tx.wait();
+  tx = await vault.deposit(1000_000000n);
+  log("deposit tx: " + tx.hash); await tx.wait();
+  log("1000 mUSDC salary sent. Waiting for the reactive tx on Lasna and the callback…");
+  setTimeout(refresh, 8000);
+};
+$("vaultAddr").textContent = CONFIG.vault;
+$("reactiveAddr").textContent = CONFIG.reactive;
+</script>
+</body>
+</html>
